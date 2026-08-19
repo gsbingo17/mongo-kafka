@@ -49,10 +49,12 @@ import org.junit.jupiter.api.Test;
 import org.bson.BsonDocument;
 
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
 
 import com.mongodb.kafka.connect.log.LogCapture;
+import com.mongodb.kafka.connect.mongodb.MongoDBHelper;
 import com.mongodb.kafka.connect.mongodb.MongoKafkaTestCase;
+import com.mongodb.kafka.connect.sink.MongoSinkConfig;
+import com.mongodb.kafka.connect.source.MongoSourceConfig;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.ErrorTolerance;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.OutputFormat;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.StartupConfig.StartupMode;
@@ -67,15 +69,22 @@ public class FullDocumentRoundTripIntegrationTest extends MongoKafkaTestCase {
 
   @AfterEach
   void tearDown() {
+    // Modified: Firestore Enterprise does not support dropDatabase, so drop collections instead.
     getMongoClient()
         .listDatabaseNames()
         .into(new ArrayList<>())
         .forEach(
             i -> {
               if (i.startsWith(getDatabaseName())) {
-                getMongoClient().getDatabase(i).drop();
+                MongoDBHelper.dropCollections(getMongoClient().getDatabase(i));
               }
             });
+    // Modified: the sweep above only clears the source when the source URI points at the main
+    // endpoint, so clear the source collection through the source endpoint as well.
+    dropSourceCollections("source");
+    // Modified: the target endpoint may hold pre-existing data that is not ours, so drop only the
+    // collection this test creates there.
+    dropTargetCollections("destination");
   }
 
   private static final String FULL_DOCUMENT_JSON =
@@ -290,12 +299,14 @@ public class FullDocumentRoundTripIntegrationTest extends MongoKafkaTestCase {
       final Properties sourcePropertyOverrides,
       final Properties sinkPropertyOverrides) {
 
-    MongoDatabase database = getDatabaseWithPostfix();
-    MongoCollection<BsonDocument> source = database.getCollection("source", BsonDocument.class);
+    // Modified: source and target come from their respective endpoints.
+    MongoCollection<BsonDocument> source =
+        getSourceDatabase().getCollection("source", BsonDocument.class);
     MongoCollection<BsonDocument> destination =
-        database.getCollection("destination", BsonDocument.class);
+        getTargetDatabase().getCollection("destination", BsonDocument.class);
 
     Properties sourceProperties = new Properties();
+    sourceProperties.put(MongoSourceConfig.CONNECTION_URI_CONFIG, getSourceConnectionUri());
     sourceProperties.put(DATABASE_CONFIG, source.getNamespace().getDatabaseName());
     sourceProperties.put(COLLECTION_CONFIG, source.getNamespace().getCollectionName());
     sourceProperties.put(TOPIC_PREFIX_CONFIG, "copy");
@@ -305,6 +316,7 @@ public class FullDocumentRoundTripIntegrationTest extends MongoKafkaTestCase {
     addSourceConnector(sourceProperties);
 
     Properties sinkProperties = createSinkProperties();
+    sinkProperties.put(MongoSinkConfig.CONNECTION_URI_CONFIG, getTargetConnectionUri());
     sinkProperties.put(
         "topics",
         format(

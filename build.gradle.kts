@@ -235,7 +235,20 @@ tasks.withType<Test> {
         languageVersion.set(JavaLanguageVersion.of(javaVersion))
     })
 
-    systemProperties(mapOf("org.mongodb.test.uri" to System.getProperty("org.mongodb.test.uri", "")))
+    // Modified: forward the Firestore test properties to the test JVM. Previously only
+    // "org.mongodb.test.uri" was forwarded, so the others were set on the Gradle JVM and never
+    // reached the tests.
+    systemProperties(
+        listOf(
+                "org.mongodb.test.uri",
+                "org.mongodb.test.database",
+                "org.mongodb.test.source.uri",
+                "org.mongodb.test.target.uri",
+                "org.mongodb.test.skip.collection.change.streams",
+                "org.mongodb.test.firestore.project",
+                "org.mongodb.test.firestore.retention",
+                "org.mongodb.test.force.database.scope")
+            .associateWith { System.getProperty(it, "") })
 
     val jdkHome = project.findProperty("jdkHome") as String?
     jdkHome.let {

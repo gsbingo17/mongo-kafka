@@ -35,3 +35,17 @@ local.properties
 
 # jenv
 .java-version
+
+# Firestore compatibility run artifacts. The Gradle logs and JUnit XML echo the connection
+# strings, which carry live SCRAM passwords. Never commit these.
+fs-results*/
+
+# generate-report.py bytecode
+__pycache__/
+
+# Local editor/agent settings. settings.local.json holds the Google Cloud project id, and its
+# save-time temp files (settings.local.json.tmp.*) are not covered by any global ignore rule.
+.claude/
+
+# Local harness documentation. Used in the working copy, deliberately not published.
+CLAUDE.md

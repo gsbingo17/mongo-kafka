@@ -85,6 +85,7 @@ import com.mongodb.client.model.changestream.OperationType;
 
 import com.mongodb.kafka.connect.log.LogCapture;
 import com.mongodb.kafka.connect.mongodb.ChangeStreamOperations.ChangeStreamOperation;
+import com.mongodb.kafka.connect.mongodb.MongoDBHelper;
 import com.mongodb.kafka.connect.mongodb.MongoKafkaTestCase;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.ErrorTolerance;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.OutputFormat;
@@ -489,6 +490,12 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
   @DisplayName("Ensure source can use custom offset partition names")
   void testSourceCanUseCustomOffsetPartitionNames() {
     assumeTrue(isGreaterThanFourDotZero());
+    // Modified: this test always watches at collection scope (COLLECTION_CONFIG below), but it
+    // calls task.start() inside assertDoesNotThrow, which converts the abort thrown by the shared
+    // check in AutoCloseableSourceTask.start() into a failure. Skip up front instead. Only the skip
+    // half is needed here; when provisioning is enabled this is inert and
+    // AutoCloseableSourceTask.start() provisions the collection the test actually watches.
+    skipIfCollectionScopeChangeStream("coll");
     try (AutoCloseableSourceTask task = createSourceTask(Logger.getLogger(MongoSourceTask.class))) {
       MongoCollection<Document> coll = getAndCreateCollection();
 
@@ -1053,7 +1060,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       assertEquals(OperationType.DELETE.getValue(), delete.getString("operationType"));
       assertEquals(expected.toJson(), delete.getString("fullDocumentBeforeChange"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1084,7 +1092,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       Struct updateDescription = (Struct) update.get("updateDescription");
       assertEquals("{}", updateDescription.getString("disambiguatedPaths"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1115,7 +1124,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       Struct updateDescription = (Struct) update.get("updateDescription");
       assertNull(updateDescription.getString("disambiguatedPaths"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1145,7 +1155,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       Struct updateDescription = (Struct) update.get("updateDescription");
       assertNull(updateDescription.getString("disambiguatedPaths"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1191,7 +1202,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       expectedTruncatedArray.add(truncatedArrayStruct);
       assertEquals(expectedTruncatedArray, updateDescription.getArray("truncatedArrays"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1207,6 +1219,13 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
     try (AutoCloseableSourceTask task = createSourceTask()) {
       MongoCollection<Document> coll = db.getCollection("coll");
       coll.drop();
+      // Modified: the start time is taken after the drop instead of Instant.EPOCH. Under a pinned
+      // database this collection group's change stream history spans previous runs, and EPOCH
+      // clamps the replay to the oldest retained event - an invalidate from an earlier run's
+      // teardown drop, which closes the cursor before the insert below is ever reached. Any
+      // instant at or before the insert drives the same connector path; this one excludes history
+      // the test did not create.
+      Instant startAtOperationTime = Instant.now();
       int id = 0;
       Document expected = new Document("_id", id);
       coll.insertOne(expected);
@@ -1214,7 +1233,7 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       cfg.put(MongoSourceConfig.STARTUP_MODE_CONFIG, StartupMode.TIMESTAMP.propertyValue());
       cfg.put(
           MongoSourceConfig.STARTUP_MODE_TIMESTAMP_START_AT_OPERATION_TIME_CONFIG,
-          Instant.EPOCH.toString());
+          startAtOperationTime.toString());
       cfg.put(MongoSourceConfig.DATABASE_CONFIG, coll.getNamespace().getDatabaseName());
       cfg.put(MongoSourceConfig.COLLECTION_CONFIG, coll.getNamespace().getCollectionName());
       cfg.put(
@@ -1231,7 +1250,8 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
       Struct insert = records.get(0);
       assertEquals(expected.toJson(), insert.getString("fullDocument"));
     } finally {
-      db.drop();
+      // Modified: Skipped dropDatabase as Firestore Enterprise does not support it.
+      MongoDBHelper.dropCollections(db);
     }
   }
 
@@ -1332,9 +1352,20 @@ public class MongoSourceTaskIntegrationTest extends MongoKafkaTestCase {
 
     @Override
     public void start(final Map<String, String> overrides) {
+      // Modified: this class drives MongoSourceTask directly rather than through
+      // addSourceConnector(), so it needs its own call site for the scope handling.
       HashMap<String, String> props = new HashMap<>();
       props.put(MongoSourceConfig.CONNECTION_URI_CONFIG, MONGODB.getConnectionString().toString());
+      String forcedDatabase = forcedSourceDatabase();
+      if (forcedDatabase != null) {
+        props.put(MongoSourceConfig.DATABASE_CONFIG, forcedDatabase);
+      }
       props.putAll(overrides);
+
+      prepareCollectionScopeChangeStream(
+          props.getOrDefault(MongoSourceConfig.DATABASE_CONFIG, MONGODB.getDatabaseName()),
+          props.get(MongoSourceConfig.COLLECTION_CONFIG));
+
       wrapped.start(props);
     }
 

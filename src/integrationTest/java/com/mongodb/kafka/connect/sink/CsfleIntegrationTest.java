@@ -49,6 +49,7 @@ import com.mongodb.client.model.vault.DataKeyOptions;
 import com.mongodb.client.vault.ClientEncryption;
 import com.mongodb.client.vault.ClientEncryptions;
 
+import com.mongodb.kafka.connect.mongodb.MongoDBHelper;
 import com.mongodb.kafka.connect.mongodb.MongoKafkaTestCase;
 
 /**
@@ -141,7 +142,9 @@ public class CsfleIntegrationTest extends MongoKafkaTestCase {
     cleanUp();
     // Clean up key vault
     try {
-      getMongoClient().getDatabase(KEY_VAULT_DB).drop();
+      // Modified: Firestore Enterprise does not support dropDatabase, so drop the collections in
+      // the key vault database instead.
+      MongoDBHelper.dropCollections(getMongoClient().getDatabase(KEY_VAULT_DB));
     } catch (Exception e) {
       // Ignore
     }

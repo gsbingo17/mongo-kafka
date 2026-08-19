@@ -50,11 +50,13 @@ import org.bson.BsonDocument;
 import org.bson.Document;
 
 import com.mongodb.ConnectionString;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoCredential;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoDatabase;
 
+import com.mongodb.kafka.connect.mongodb.MongoDBHelper;
 import com.mongodb.kafka.connect.sink.MongoSinkConfig;
 import com.mongodb.kafka.connect.sink.MongoSinkTopicConfig;
 import com.mongodb.kafka.connect.source.MongoSourceConfig;
@@ -64,7 +66,16 @@ public final class ConnectorValidationIntegrationTest {
 
   private static final String DEFAULT_URI = "mongodb://localhost:27017/";
   private static final String URI_SYSTEM_PROPERTY_NAME = "org.mongodb.test.uri";
-  private static final String DEFAULT_DATABASE_NAME = "MongoKafkaTest";
+  // Modified: this class does not extend MongoKafkaTestCase, so it needs its own reading of
+  // org.mongodb.test.database. Databases cannot be created on demand on Firestore Enterprise, so
+  // the hardcoded "MongoKafkaTest" is rejected with "Invalid database name:
+  // <project>#MongoKafkaTest" and the timeseries tests fail on that before reaching any connector
+  // logic. Pinning to a provisioned database lets them produce a real compatibility signal.
+  // Unset by default, which keeps the original behaviour.
+  private static final String DEFAULT_DATABASE_NAME =
+      Optional.ofNullable(System.getProperty("org.mongodb.test.database"))
+          .filter(s -> !s.isEmpty())
+          .orElse("MongoKafkaTest");
 
   private static final String CUSTOM_ROLE = "customRole";
   private static final String CUSTOM_USER = "customUser";
@@ -570,15 +581,36 @@ public final class ConnectorValidationIntegrationTest {
     createUser(databaseName, singletonList(role));
   }
 
+  /**
+   * Modified: user and role management is administered through the cloud console rather than the
+   * MongoDB wire protocol on Firestore Enterprise, so createUser/createRole come back as
+   * unsupported commands. Rather than skipping unconditionally, run the command and turn only an
+   * "unsupported command" failure into a JUnit assumption, so runs against native MongoDB are
+   * unaffected. The affected tests then report as SKIPPED with the reason attached instead of
+   * failing; a skip is never counted as a pass.
+   */
+  private void runUserManagementCommand(final MongoDatabase database, final Document command) {
+    try {
+      database.runCommand(command);
+    } catch (MongoCommandException e) {
+      assumeFalse(
+          e.getErrorCode() == 59 || e.getMessage().contains("Unsupported command"),
+          format(
+              "Skipping: the endpoint does not support user and role provisioning over the wire"
+                  + " protocol (%s).",
+              e.getErrorMessage()));
+      throw e;
+    }
+  }
+
   private void createUser(final String databaseName, final List<String> roles) {
     String userRoles = roles.stream().map(s -> "\"" + s + "\"").collect(Collectors.joining(","));
-    getMongoClient()
-        .getDatabase(databaseName)
-        .runCommand(
-            Document.parse(
-                format(
-                    "{createUser: '%s', pwd: '%s', roles: [%s]}",
-                    CUSTOM_USER, CUSTOM_PASSWORD, userRoles)));
+    runUserManagementCommand(
+        getMongoClient().getDatabase(databaseName),
+        Document.parse(
+            format(
+                "{createUser: '%s', pwd: '%s', roles: [%s]}",
+                CUSTOM_USER, CUSTOM_PASSWORD, userRoles)));
   }
 
   private void createUserFromDocument(final String role) {
@@ -586,13 +618,12 @@ public final class ConnectorValidationIntegrationTest {
   }
 
   private void createUserFromDocument(final List<String> roles) {
-    getMongoClient()
-        .getDatabase(getAuthSource())
-        .runCommand(
-            Document.parse(
-                format(
-                    "{createUser: '%s', pwd: '%s', roles: [%s]}",
-                    CUSTOM_USER, CUSTOM_PASSWORD, String.join(",", roles))));
+    runUserManagementCommand(
+        getMongoClient().getDatabase(getAuthSource()),
+        Document.parse(
+            format(
+                "{createUser: '%s', pwd: '%s', roles: [%s]}",
+                CUSTOM_USER, CUSTOM_PASSWORD, String.join(",", roles))));
   }
 
   private void createUserWithCustomRole(final List<String> privileges) {
@@ -605,13 +636,12 @@ public final class ConnectorValidationIntegrationTest {
 
   private void createUserWithCustomRole(
       final String databaseName, final List<String> privileges, final List<String> roles) {
-    getMongoClient()
-        .getDatabase(databaseName)
-        .runCommand(
-            Document.parse(
-                format(
-                    "{createRole: '%s', privileges: [%s], roles: [%s]}",
-                    CUSTOM_ROLE, String.join(",", privileges), String.join(",", roles))));
+    runUserManagementCommand(
+        getMongoClient().getDatabase(databaseName),
+        Document.parse(
+            format(
+                "{createRole: '%s', privileges: [%s], roles: [%s]}",
+                CUSTOM_ROLE, String.join(",", privileges), String.join(",", roles))));
     createUser(databaseName, CUSTOM_ROLE);
   }
 
@@ -633,8 +663,13 @@ public final class ConnectorValidationIntegrationTest {
   }
 
   private void dropDatabases() {
-    tryAndIgnore(() -> getMongoClient().getDatabase(DEFAULT_DATABASE_NAME).drop());
-    tryAndIgnore(() -> getMongoClient().getDatabase(CUSTOM_DATABASE).drop());
+    // Modified: Firestore Enterprise does not support dropDatabase. The failure was already
+    // swallowed by tryAndIgnore, so the databases were simply never emptied; drop the collections
+    // instead so teardown actually cleans up.
+    tryAndIgnore(
+        () -> MongoDBHelper.dropCollections(getMongoClient().getDatabase(DEFAULT_DATABASE_NAME)));
+    tryAndIgnore(
+        () -> MongoDBHelper.dropCollections(getMongoClient().getDatabase(CUSTOM_DATABASE)));
   }
 
   public static void tryAndIgnore(final Runnable r) {

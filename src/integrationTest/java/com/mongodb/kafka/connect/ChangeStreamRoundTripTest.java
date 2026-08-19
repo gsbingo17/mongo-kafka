@@ -27,6 +27,7 @@ import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static java.util.stream.IntStream.rangeClosed;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.util.Arrays;
@@ -50,8 +51,10 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Updates;
 
 import com.mongodb.kafka.connect.mongodb.MongoKafkaTestCase;
+import com.mongodb.kafka.connect.sink.MongoSinkConfig;
 import com.mongodb.kafka.connect.sink.MongoSinkTopicConfig;
 import com.mongodb.kafka.connect.sink.cdc.mongodb.ChangeStreamHandler;
+import com.mongodb.kafka.connect.source.MongoSourceConfig;
 import com.mongodb.kafka.connect.source.MongoSourceConfig.StartupConfig.StartupMode;
 
 public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
@@ -60,18 +63,56 @@ public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
   void setUp() {
     assumeTrue(isReplicaSetOrSharded());
     cleanUp();
+    cleanUpSource();
+    cleanUpTarget();
   }
 
   @AfterEach
   void tearDown() {
     cleanUp();
+    cleanUpSource();
+    cleanUpTarget();
+  }
+
+  /**
+   * Modified: cleanUp() sweeps the main endpoint, which only clears the source when the source URI
+   * points at it. Clear the source collections through the source endpoint as well.
+   */
+  private void cleanUpSource() {
+    dropSourceCollections("coll1", "coll2");
+  }
+
+  /**
+   * Modified: the target endpoint may be a pre-existing database holding data that is not ours, so
+   * drop only the collections these tests create there.
+   */
+  private void cleanUpTarget() {
+    dropTargetCollections("coll1", "coll2");
+  }
+
+  /**
+   * Modified: these tests replicate a whole database into another and assert the two match
+   * collection for collection, under the same collection names. If source and target resolve to the
+   * same database the sink writes into the collection the source is watching and the assertion
+   * compares a database with itself, succeeding before the connectors do anything. Skip rather than
+   * report that vacuous pass.
+   */
+  private void assumeDistinctDatabases() {
+    assumeFalse(
+        getSourceDatabase().getName().equals(getTargetDatabase().getName())
+            && getSourceConnectionUri().equals(getTargetConnectionUri()),
+        "Source and target resolve to the same database, so the round trip assertion would"
+            + " compare a database with itself. Set org.mongodb.test.source.uri and"
+            + " org.mongodb.test.target.uri to two distinct databases.");
   }
 
   @Test
   @DisplayName("Ensure collection CRUD operations can be round tripped")
   void testRoundTripCollectionCrud() {
-    MongoDatabase original = getDatabaseWithPostfix();
-    MongoDatabase replicated = getDatabaseWithPostfix();
+    // Modified: source and target come from their respective endpoints.
+    assumeDistinctDatabases();
+    MongoDatabase original = getSourceDatabase();
+    MongoDatabase replicated = getTargetDatabase();
     MongoCollection<Document> coll1 = original.getCollection("coll1");
 
     // Test existing messages will be round tripped
@@ -112,8 +153,10 @@ public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
   @DisplayName("Ensure database CRUD operations can be round tripped")
   void testRoundTripDatabaseCrud() {
     assumeTrue(isGreaterThanThreeDotSix());
-    MongoDatabase original = getDatabaseWithPostfix();
-    MongoDatabase replicated = getDatabaseWithPostfix();
+    // Modified: source and target come from their respective endpoints.
+    assumeDistinctDatabases();
+    MongoDatabase original = getSourceDatabase();
+    MongoDatabase replicated = getTargetDatabase();
     MongoCollection<Document> coll1 = original.getCollection("coll1");
     MongoCollection<Document> coll2 = original.getCollection("coll2");
 
@@ -155,8 +198,10 @@ public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
     // Port of scenarios from
     // mongo/jstests/change_streams/pipeline_style_updates_v2_oplog_entries.js
     assumeTrue(isGreaterThanFourDotZero() && !isGreaterThanFourDotFour());
-    MongoDatabase original = getDatabaseWithPostfix();
-    MongoDatabase replicated = getDatabaseWithPostfix();
+    // Modified: source and target come from their respective endpoints.
+    assumeDistinctDatabases();
+    MongoDatabase original = getSourceDatabase();
+    MongoDatabase replicated = getTargetDatabase();
     MongoCollection<Document> coll1 = original.getCollection("coll1");
 
     addSourceConnector(getSourceProperties(original));
@@ -281,6 +326,8 @@ public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
   @NotNull
   private Properties getSourceProperties(final MongoDatabase database) {
     Properties sourceProperties = new Properties();
+    // Modified: point the source connector at the source endpoint.
+    sourceProperties.put(MongoSourceConfig.CONNECTION_URI_CONFIG, getSourceConnectionUri());
     sourceProperties.put(DATABASE_CONFIG, database.getName());
     sourceProperties.put(TOPIC_PREFIX_CONFIG, "copy");
     sourceProperties.put(STARTUP_MODE_CONFIG, StartupMode.COPY_EXISTING.propertyValue());
@@ -291,6 +338,8 @@ public class ChangeStreamRoundTripTest extends MongoKafkaTestCase {
   private Properties getSinkProperties(
       final MongoDatabase destination, final MongoCollection<?>... sources) {
     Properties sinkProperties = createSinkProperties();
+    // Modified: point the sink connector at the target endpoint.
+    sinkProperties.put(MongoSinkConfig.CONNECTION_URI_CONFIG, getTargetConnectionUri());
 
     String topics =
         Arrays.stream(sources)
